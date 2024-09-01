@@ -1,24 +1,30 @@
+import argparse
+parser = argparse.ArgumentParser(description="Perform training and use MLP in reinforcement learning task: Mountain Car Continous")
+parser.add_argument("-m", "--mode", help="Select application mode: training (0) or animation (1)", choices=[0, 1], type=int)
+parser.add_argument("-n", "--new", help="Add this flag if you want to reinitialize model", action='store_true')
+parser.add_argument("-i", "--iterations", help="If mode is training(0) it specifies number of learning iterations "
+                                               "alternatively number of animations to be displayed", default=20, type=int)
+args = parser.parse_args()
+print(args)
+ENVIRONMENT_TITLE = "MountainCarContinuous-v0"
+
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 import gym, os
 import matplotlib.pyplot as plt
 import time
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-import argparse
-parser = argparse.ArgumentParser(description="Perform training and use MLP in reinforcement learning task: Mountain Car Continous")
-parser.add_argument("-m", "--mode", help="Select application mode: training (0) or animation (1)", choices=["0", "1"])
-parser.add_argument("-n", "--new", help="Add this flag if you want to reinitialize model", action='store_true')
-parser.add_argument("-i", "--iterations", help="If mode is training(0) it specifies number of learning iterations "
-                                               "alternatively number of animations to be displayed", default=10, type=int)
-args = parser.parse_args()
-ENVIRONMENT_TITLE = "MountainCarContinuous-v0"
-
 
 class Agent:
     def __init__(self):
         self.optimizer_ = keras.optimizers.Adam(learning_rate=0.01)
         self.loss_fn_ = keras.losses.binary_crossentropy
         self.model_ = self.create_model()
+        print(self.model_.summary())
 
     def create_model(self):
         """
@@ -26,8 +32,8 @@ class Agent:
         :return:
         """
         return keras.models.Sequential([
-            keras.layers.Dense(4, activation="elu", input_shape=[2]),
-            keras.layers.Dense(1, activation="sigmoid")
+            keras.layers.Dense(1, activation="elu", input_shape=[2]),
+            keras.layers.Dense(1, activation="tanh")
         ])
 
     @property
@@ -55,15 +61,18 @@ class Agent:
         Function that should be overloaded in subclasses
         :return:
         """
-        # left_probability = 1 -> action 0 (move left)
-        # left_probability = 0 -> action 1 (move right)
-        left_probability = self(observation[np.newaxis])
-        # randomized action
-        action = tf.random.uniform([1, 1]) > left_probability
-        y_target = 0 if tf.cast(action, tf.float32) == 1 else 1
-        y_target = tf.constant([[y_target]])
+        # move = -1..0 -> action 0 (move left)
+        #
+        # move = 0..1 -> action 1 (move right)
+        action = self.model(observation[np.newaxis])
 
-        return int(action[0,0].numpy()), left_probability, y_target
+
+        # randomized action
+        y_target = 1 if tf.reduce_mean(action) > 0 else -1
+        y_target = tf.constant([[y_target]])
+        # y_target = action
+
+        return action, y_target
 
     def play_one_step(self, observation):
         """
@@ -73,8 +82,8 @@ class Agent:
         """
         with tf.GradientTape() as tape:
             # let's assume that performed action was correct.
-            action, left_probability, y_target = self(observation)
-            loss = tf.reduce_mean(self.loss_fn(y_target, left_probability))
+            action, y_target = self(observation)
+            loss = tf.reduce_mean(self.loss_fn(y_target, action))
         grads = tape.gradient(loss, self.model.trainable_variables)
         return action, grads
 
@@ -91,20 +100,33 @@ class Agent:
                  for episode_index, discounted_rewards in enumerate(all_discounted_rewards)
                  for step, discounted_reward in enumerate(discounted_rewards)], axis=0)
             all_mean_grads.append(mean_grads)
-        self.model.optimizer.apply_gradients(zip(all_mean_grads, self.model.trainable_variables))
+        self.optimizer.apply_gradients(zip(all_mean_grads, self.model.trainable_variables))
 
 class Animation:
-    def __init__(self, environment_name, model, render_mode="rgb_array"):
+    def __init__(self, environment_name, model, render_mode="human"):
         self.environment_name = environment_name
         self.agent = agent
-        self.render_mode = "rgb_array"
+        self.render_mode = render_mode
         self.env = gym.make(self.environment_name, render_mode=self.render_mode)
 
     def render(self):
-        _ = self.env.render()
         if self.render_mode == "human":
+            _ = self.env.render()
             time.sleep(0.05)
 
+    def play_multiple_steps(self, max_steps, render=False):
+        observation = self.env.reset()
+        observation = observation[0]
+        rewards = []
+        for step in range(max_steps):
+            action, grads = self.agent.play_one_step(observation)
+            observation, reward, terminated, truncated, info = self.env.step(action)
+            if render:
+                logger.info(f"Action: {action[0,0].numpy()}")
+                self.render()
+            rewards.append(reward)
+            if truncated or terminated:
+                break
 
     @staticmethod
     def discount_rewards(rewards, discount_factor):
@@ -124,7 +146,7 @@ class Animation:
         return [(discount - reward_mean) / reward_std
                 for discount in all_discounted]
 
-    def play_multiple_episodes(self, episodes, max_steps):
+    def play_multiple_episodes(self, episodes, max_steps, render=False):
         all_rewards = []
         all_grads = []
 
@@ -135,11 +157,14 @@ class Animation:
             observation = self.env.reset()
             observation = observation[0]
 
-
+            reward_sum = 0
             for step in range(max_steps):
                 action, grads = self.agent.play_one_step(observation)
-                observation, reward, terminated, truncated = self.env.step(action)
-                print("i", observation)
+                observation, reward, terminated, truncated, info = self.env.step(action)
+                if render:
+                    reward_sum += reward
+                    logger.info(f"Episode {episode}, Step {step}, action: {action} rewards: {reward_sum}" )
+                    self.render()
                 episode_rewards.append(reward)
                 episode_grads.append(grads)
                 if truncated or terminated:
@@ -150,47 +175,61 @@ class Animation:
 
         return all_rewards, all_grads
 
-    def fit_tf_model(self, iterations, episodes_per_update, max_steps, discount_factor=0.95):
+    def fit_tf_model(self, iterations, episodes_per_update, max_steps, discount_factor=0.95, render=False):
 
         avg_rewards = []
         best_model = None
         current_max_reword = 0
         current_max_reword_index = 0
         for i in range(iterations):
-            all_rewards, all_grads = self.play_multiple_episodes(episodes_per_update, max_steps)
+            all_rewards, all_grads = self.play_multiple_episodes(episodes_per_update, max_steps, render=render)
             avg_rewards.append(np.mean([sum(rewards) for rewards in all_rewards]))
 
             all_discounted_rewards = Animation.discount_and_normalize(all_rewards, discount_factor)
             self.agent.apply_gradients(all_grads, all_discounted_rewards)
 
-            print(f"Iteration {i}: avg_rewards:", avg_rewards[-1])
+            logger.info(f"Iteration {i}: avg_rewards: {avg_rewards[-1]}")
 
             if current_max_reword < avg_rewards[-1]:
                 current_max_reword = avg_rewards[-1]
                 best_model = self.agent.clone()
 
-                print(f"Iteration {i}: best model changed. Last model at iteration {current_max_reword_index}",
-                      avg_rewards[-1])
+                logger.info(f"Iteration {i}: best model changed. Last model at iteration {current_max_reword_index} {avg_rewards[-1]}")
                 current_max_reword_index = i
         return avg_rewards, best_model
 
 if __name__ == "__main__":
     agent = Agent()
-    animation = Animation(environment_name=ENVIRONMENT_TITLE, model=agent)
 
     if args.mode is None or args.mode == 0:
-        print("Going into training mode.")
+
+        # animation = Animation(environment_name=ENVIRONMENT_TITLE, model=agent, render_mode="rgb_array")
+        animation = Animation(environment_name=ENVIRONMENT_TITLE, model=agent, render_mode="human")
+        logger.info("Going into training mode.")
         if not args.new:
-            print("Loading last model.")
+            logger.info("Loading last model.")
             agent.load_weights(not_raise = True)
 
         all_rewards, best_model = animation.fit_tf_model(iterations=args.iterations,
-                                                         episodes_per_update=10,
-                                                         max_steps=500,
-                                                         discount_factor=0.95)
+                                                         episodes_per_update=1,
+                                                         max_steps=200,
+                                                         discount_factor=0.999,
+                                                         render = True
+                                                         )
         agent.save_weights()
         plt.plot(list(range(len(all_rewards))), all_rewards)
         plt.show()
-        pass
+
     else:
+
+        animation = Animation(environment_name=ENVIRONMENT_TITLE, model=agent, render_mode="human")
+        logger.info("Going into animation mode.")
+        if os.path.exists("best_model_weights.h5"):
+            logger.info("Loading last model.")
+            agent.load_weights('best_model_weights.h5')
+        else:
+            raise "You have to train model first!"
+
+        animation.play_multiple_steps(max_steps=100, render=True)
+
         pass
