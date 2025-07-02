@@ -33,7 +33,7 @@ class Agent:
         """
         return keras.models.Sequential([
             keras.layers.Dense(1, activation="elu", input_shape=[2]),
-            keras.layers.Dense(1, activation="tanh")
+            keras.layers.Dense(2, activation="sigmoid")
         ])
 
     @property
@@ -61,10 +61,12 @@ class Agent:
         Function that should be overloaded in subclasses
         :return:
         """
-        # move = -1..0 -> action 0 (move left)
-        #
-        # move = 0..1 -> action 1 (move right)
-        action = self.model(observation[np.newaxis])
+        # move[0] = 0..1 -> action 0 (move left prob)
+        # move[1] = 0..1 -> action 1 (move right prob)
+        threshold = 0.4 # make action only if not below
+        # if move[0] > threshold and move[0] > threshold random decision
+
+        actions = self.model(observation[np.newaxis])
 
 
         # randomized action
